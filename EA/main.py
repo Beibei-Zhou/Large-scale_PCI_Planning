@@ -7,8 +7,8 @@ import time
 
 def main():
     # Set random seeds for reproducibility
-    random.seed(42)
-    np.random.seed(42)
+    # random.seed(42)
+    # np.random.seed(42)
 
     # File paths
     cell_info_file = '小区信息_filtered.xlsx'
@@ -42,7 +42,8 @@ def main():
         tournament_size=5,
         optimized_population = False,
         baseline_pci_assignment=baseline_pci_assignment,
-        hc_iterations=2500)
+        hc_iterations=2500,
+        selection_method = 'roulette')
     end_time = time.time()
     best_pci_assignment, best_fitness = evolutionary_algo.run()
 

@@ -8,7 +8,8 @@ class EvolutionaryAlgorithm:
     def __init__(self, fitness_calculator, num_cells=2890, num_pcis=1008, 
                  population_size=100, generations=100, mutation_rate=0.1,
                  crossover_rate=0.7, tournament_size=5, optimized_population=False, 
-                 baseline_pci_assignment=None, hc_iterations=1000):
+                 baseline_pci_assignment=None, hc_iterations=1000, selection_method = 'tournament'):
+        
         """
         Initialize the Evolutionary Algorithm with necessary parameters.
 
@@ -40,6 +41,12 @@ class EvolutionaryAlgorithm:
         self.baseline_MR_collision = 47838
         self.baseline_MR_confusion = 0
         self.baseline_MR_interference = 50444178
+        self.selection_method = selection_method.lower()
+        self.valid_selection_methods = ['tournament', 'roulette']
+        
+        if self.selection_method not in self.valid_selection_methods:
+            raise ValueError(f"Invalid selection_method '{selection_method}'. "
+                             f"Choose from {self.valid_selection_methods}.")
         
         if self.optimized_population:
             if self.baseline_pci_assignment is None:
@@ -138,7 +145,7 @@ class EvolutionaryAlgorithm:
             fitness_scores.append(MR_sum)
         return fitness_scores
     
-    def select_individuals(self, population, fitness_scores):
+    def select_individuals_tournament(self, population, fitness_scores):
         """Select individuals using tournament selection."""
         selected_individuals = []
         for _ in range(self.population_size):
@@ -146,6 +153,48 @@ class EvolutionaryAlgorithm:
             tournament_winner = min(tournament, key=lambda x: x[1])
             # Append both individual and its fitness
             selected_individuals.append((copy.deepcopy(tournament_winner[0]), tournament_winner[1]))
+        return selected_individuals
+    
+    def select_individuals_roulette(self, population, fitness_scores):
+        """Select individuals using roulette selection"""
+        selected_individuals = []
+
+        # Ensure there are individuals to select from
+        if not population or not fitness_scores:
+            return selected_individuals
+
+        # Transform fitness scores: since lower fitness is better, invert the scores
+        epsilon = 1e-6
+        try:
+            inverted_fitness = [1.0 / (f + epsilon) for f in fitness_scores]
+        except ZeroDivisionError:
+            raise ValueError("Fitness scores must be non-negative")
+        
+        total_fitness = sum(inverted_fitness)
+
+        if total_fitness == 0:
+            raise ValueError("Total inverted fitness is zero. Check fitness scores")
+        
+        selection_probs = [f / total_fitness for f in inverted_fitness]
+        
+        # Create cumulative probability distribution
+        cumulative_probs = []
+        cumulative = 0.0
+
+        for prob in selection_probs:
+            cumulative += prob
+            cumulative_probs.append(cumulative)
+        
+        # Selection process:
+        for _ in range(self.population_size):
+            r = random.random()
+            # Find the individual corresponding to the ramdom number
+            for index, cumulative_prob in enumerate(cumulative_probs):
+                if r <= cumulative_prob:
+                    selected_individual = copy.deepcopy(population[index])
+                    selected_fitness = fitness_scores[index]
+                    selected_individuals.append((selected_individual, selected_fitness))
+                    break
         return selected_individuals
     
     def crossover(self, parent1, parent2, parent1_fitness, parent2_fitness):
@@ -192,12 +241,35 @@ class EvolutionaryAlgorithm:
                 individual[i] = random.randint(0, self.num_pcis - 1)
         return individual
     
+    def get_neighbor(self, individual):
+        """
+        Generate a neighboring PCI assignment by randomly changing the PCI of one cell.
+
+        Parameters:
+        - individual (numpy array): The current PCI assignment array.
+
+        Returns:
+        - neighbor (numpy array): A new PCI assignment array representing the neighbor.
+        """
+        neighbor = copy.deepcopy(individual)
+        cell_to_change = random.randint(0, self.num_cells - 1)
+        current_pci = neighbor[cell_to_change]
+        
+        # Choose a new PCI different from the current one
+        new_pci = random.randint(0, self.num_pcis - 1)
+        while new_pci == current_pci:
+            new_pci = random.randint(0, self.num_pcis - 1)
+        neighbor[cell_to_change] = new_pci
+        return neighbor
+
     def mutate(self, individual):
         """
-        Mutate an individual using hill-climbing.
+        Mutate an individual using a hill-climbing approach.
 
-        For each gene (PCI assignment), with a probability defined by mutation_rate,
-        search for a better PCI assignment that reduces the MR_sum.
+        For the given individual, iteratively search for better neighboring PCI assignments
+        by altering one gene at a time. Update the individual if an improvement is found.
+        The process continues until no improvement is possible or a maximum number of
+        hill-climbing iterations is reached.
 
         Parameters:
         - individual (numpy array): The PCI assignment array of the individual.
@@ -205,46 +277,34 @@ class EvolutionaryAlgorithm:
         Returns:
         - individual (numpy array): The mutated (and possibly optimized) individual.
         """
+        max_hc_iterations = self.hc_iterations  # Define a maximum number of hill-climbing iterations per mutation
+        hc_iterations = 0
+        patience = 0
         # Calculate the original fitness of the individual
         original_fitness, _, _, _ = self.fitness_calculator.calculate_MR(individual)
 
-        for gene_index in range(self.num_cells):
-            if random.random() < self.mutation_rate:
-                current_pci = individual[gene_index]
-                best_pci = current_pci
-                best_fitness = original_fitness
+        while hc_iterations < max_hc_iterations:
+            improvement = False
+            hc_iterations += 1
+            for _ in range(self.num_cells):
+                # Generate a neighbor
+                neighbor = self.get_neighbor(individual)
+                neighbor_fitness, _, _, _ = self.fitness_calculator.calculate_MR(neighbor)
 
-                # Number of candidate PCIs to evaluate for improvement
-                num_candidates = 2  # Adjust based on computational resources
+                # Check if the neighbor is better
+                if neighbor_fitness < original_fitness:
+                    # Update the individual to the better neighbor
+                    individual = copy.deepcopy(neighbor)
+                    original_fitness = neighbor_fitness
+                    improvement = True
 
-                for _ in range(num_candidates):
-                    # Generate a candidate PCI different from the current one
-                    candidate_pci = random.randint(0, self.num_pcis - 1)
-                    while candidate_pci == current_pci:
-                        candidate_pci = random.randint(0, self.num_pcis - 1)
-
-                    # Create a temporary copy of the individual with the candidate mutation
-                    temp_individual = copy.deepcopy(individual)
-                    temp_individual[gene_index] = candidate_pci
-
-                    # Evaluate fitness of the mutated individual
-                    candidate_fitness, _, _, _ = self.fitness_calculator.calculate_MR(temp_individual)
-
-                    # Check if this mutation improves fitness
-                    if candidate_fitness < best_fitness:
-                        best_fitness = candidate_fitness
-                        best_pci = candidate_pci
-
-                # Update the gene with the best PCI found, if it's better
-                if best_pci != current_pci:
-                    individual[gene_index] = best_pci
-                    original_fitness = best_fitness  # Update the original fitness
-                    # Optional: Uncomment the following line to see mutation improvements
-                    # print(f"Gene {gene_index}: PCI improved from {current_pci} to {best_pci} (MR_sum: {best_fitness})")
-                # else:
-                    # Optional: Uncomment the following line to see when no improvement is found
-                    # print(f"Gene {gene_index}: No improvement found for PCI {current_pci}")
-
+                    # Optional: Log the improvement (you can customize this as needed)
+                    #print(f"Hill-Climbing Iteration {hc_iterations}: Improved MR_sum to {neighbor_fitness}")
+                    break
+            if not improvement:
+                patience += 1
+            if patience >= 2:
+                break
         return individual
     
     def write_population_to_csv(self, population, generation):
@@ -351,7 +411,12 @@ class EvolutionaryAlgorithm:
             self.write_population_to_csv(population, generation + 1)
 
             # Selection
-            selected_individuals = self.select_individuals(population, fitness_scores)
+            if self.selection_method == 'tournament':
+                selected_individuals = self.select_individuals_tournament(population, fitness_scores)
+            elif self.selection_method == 'roulette':
+                selected_individuals = self.select_individuals_roulette(population, fitness_scores)
+            else:
+                raise ValueError(f"Unsupported selection method")
 
             # Generate a new population
             new_population = []
